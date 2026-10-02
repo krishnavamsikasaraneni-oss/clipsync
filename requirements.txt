@@ -1,0 +1,10 @@
+PySide6>=6.6
+websockets>=13
+cryptography>=42
+spake2>=0.9
+zeroconf>=0.131
+ifaddr>=0.2
+pynput>=1.7.7
+sounddevice>=0.4.6
+numpy>=1.26
+faster-whisper>=1.0
