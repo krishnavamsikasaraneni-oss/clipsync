@@ -1,0 +1,103 @@
+name: Build ClipSync for Windows
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to attach files to a release when you push a v* tag
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest huggingface_hub
+
+      - name: Download the English speech model (bundled so the app works offline)
+        run: python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-base.en', local_dir='models/base.en')"
+
+      - name: Make a test recording with Windows text-to-speech
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Speech
+          $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+          $s.SetOutputToWaveFile("$PWD\voice_test.wav")
+          $s.Speak("Hello from the second computer. This is a voice typing test.")
+          $s.Dispose()
+
+      - name: Run tests
+        env:
+          CLIPSYNC_VOICE_WAV: voice_test.wav
+          CLIPSYNC_HOME: ${{ runner.temp }}\clipsync-test
+        run: pytest -v
+
+      - name: Build ClipSync Sender
+        run: >
+          pyinstaller --noconfirm --windowed --name ClipSyncSender
+          --collect-submodules zeroconf
+          sender_app.py
+
+      - name: Build ClipSync Receiver
+        run: >
+          pyinstaller --noconfirm --windowed --name ClipSyncReceiver
+          --collect-submodules zeroconf
+          --collect-all faster_whisper --collect-all ctranslate2 --collect-binaries onnxruntime
+          --collect-all _sounddevice_data
+          --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32
+          receiver_app.py
+
+      - name: Bundle speech model and guide
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist\ClipSyncReceiver\models | Out-Null
+          Copy-Item -Recurse models\base.en dist\ClipSyncReceiver\models\base.en
+          Remove-Item -Recurse -Force dist\ClipSyncReceiver\models\base.en\.cache -ErrorAction SilentlyContinue
+          Copy-Item SETUP.md dist\ClipSyncSender\
+          Copy-Item SETUP.md dist\ClipSyncReceiver\
+
+      - name: Check the built apps start (self-test)
+        shell: pwsh
+        env:
+          CLIPSYNC_HOME: ${{ runner.temp }}\clipsync-selftest
+        run: |
+          foreach ($app in "ClipSyncSender", "ClipSyncReceiver") {
+            $p = Start-Process -FilePath "dist\$app\$app.exe" -ArgumentList "--selftest" -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "$app self-test failed with exit code $($p.ExitCode)" }
+            Write-Host "$app self-test passed"
+          }
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\ClipSyncSender -DestinationPath ClipSyncSender-PC1.zip
+          Compress-Archive -Path dist\ClipSyncReceiver -DestinationPath ClipSyncReceiver-PC2.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClipSyncSender-PC1
+          path: ClipSyncSender-PC1.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClipSyncReceiver-PC2
+          path: ClipSyncReceiver-PC2.zip
+
+      - name: Attach to release (only when you push a v* tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ClipSyncSender-PC1.zip
+            ClipSyncReceiver-PC2.zip
